@@ -7,6 +7,7 @@ import {
     SafeERC20
 } from "openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import {SafeMath} from "./SafeMath.sol";
+import {Babylonian} from "./Babylonian.sol";
 
 // Uniswap handles arbirary amounts, but we limit the amount to 10x just in case
 uint256 constant RESERVE_LIMIT_FACTOR = 10;
@@ -62,27 +63,45 @@ contract UniswapV2SwapAdapter is ISwapAdapter {
         return Fraction(newReserveOut * 997, newReserveIn * 1000);
     }
 
-    // Wrapper around https://github.com/Uniswap/v2-core/blob/ee547b17853e71ed4e0101ccfd52e70d5acded58/contracts/UniswapV2Pair.sol#L143
-    function _calcTokensOutGivenExactLpTokenIn(
-        IUniswapV2Pair pair,
-        uint256[] memory balance0,
-        uint256[] memory balance1,
-        uint256 liquidity // amount of lp token in 
-    ) internal pure returns (uint256 amount0, uint256 amount1) {
-        
-        uint256 _totalSupply = pair.totalSupply();
-
-        amount0 = liquidity.mul(balance0) / _totalSupply; // using balances ensures pro-rata distribution
-        amount1 = liquidity.mul(balance1) / _totalSupply; // using balances ensures pro-rata distribution
+    //FROM: https://github.com/Uniswap/v2-periphery/blob/master/contracts/libraries/UniswapV2LiquidityMathLibrary.sol#L75
+    // computes liquidity value given all the parameters of the pair
+    function computeLiquidityValue(
+        uint256 reservesA,
+        uint256 reservesB,
+        uint256 totalSupply,
+        uint256 liquidityAmount,
+        bool feeOn,
+        uint kLast
+    ) internal pure returns (uint256 token0Amount, uint256 token1Amount) {
+        if (feeOn && kLast > 0) {
+            uint rootK = Babylonian.sqrt(reservesA.mul(reservesB));
+            uint rootKLast = Babylonian.sqrt(kLast);
+            if (rootK > rootKLast) {
+                uint numerator1 = totalSupply;
+                uint numerator2 = rootK.sub(rootKLast);
+                uint denominator = rootK.mul(5).add(rootKLast);
+                uint numerator = numerator1.mul(numerator2);
+                uint feeLiquidity = numerator / denominator;
+                totalSupply = totalSupply.add(feeLiquidity);
+            }
+        }
+        return (reservesA.mul(liquidityAmount) / totalSupply, reservesB.mul(liquidityAmount) / totalSupply);
     }
 
-    //(lp tokens we want to redeem (burn) / totalsupply of lp tokens) * balance of token0
-    //is is assumed that the solver has sent the lp tokens to the contract before calling burn() -> do it in one txn 
-    //if not someone else can burn your tokens and remove your liquidity 
-    // so our design would be like a safer wrapper around it so that we specify the amount we want to burn, enable token allowance, transfer it 
-    // then we receive token0 and token1 (thats it gets redeemed) (UniswapV2Router02 has this logic)
-    //track mint and burn events for lp token deltas and token0 and token1 deltas -> NOOOOOO
-    // this low-level function should be called from a contract which performs important safety checks
+    // get all current parameters from the pair and compute value of a liquidity amount
+    // **note this is subject to manipulation, e.g. sandwich attacks**. prefer passing a manipulation resistant price to
+    // #getLiquidityValueAfterArbitrageToPrice
+    function getLiquidityValue(
+        bytes32 poolId,
+        uint256 liquidityAmount //lpTokenAmountIn
+    ) internal view returns (uint256 token0Amount, uint256 token1Amount) {
+        IUniswapV2Pair pair = IUniswapV2Pair(address(bytes20(poolId)));
+        (uint256 reservesA, uint256 reservesB, ) = pair.getReserves();
+        bool feeOn = factory.feeTo() != address(0);
+        uint kLast = feeOn ? pair.kLast() : 0;
+        uint totalSupply = pair.totalSupply();
+        return computeLiquidityValue(reservesA, reservesB, totalSupply, liquidityAmount, feeOn, kLast);
+    }
 
      /// @notice Checks if the specified amount is within the hard limits
     /// @dev If not, reverts
@@ -101,15 +120,15 @@ contract UniswapV2SwapAdapter is ISwapAdapter {
         }
     }
 
-    enum SwapType { TokenToToken, removeLiquidity, addLiquidity, Invalid }
+    enum SwapType { TokenToToken, RemoveLiquidity, AddLiquidity, Invalid }
 
-    function _getSwapType(address poolId, address sellToken, address buyToken) private view returns (SwapType) {
-        bool sellIsPool = (sellToken == address(poolId));
-        bool buyIsPool = (buyToken == address(poolId));
+    function _getSwapType(bytes32 poolId, address sellToken, address buyToken) private view returns (SwapType) {
+        bool sellIsPool = (sellToken == address(bytes20(poolId)));
+        bool buyIsPool = (buyToken == address(bytes20(poolId)));
 
         if (!sellIsPool && !buyIsPool) return SwapType.TokenToToken;
-        if (sellIsPool && !buyIsPool) return SwapType.removeLiquidity;
-        if (!sellIsPool && buyIsPool) return SwapType.addLiquidity;
+        if (sellIsPool && !buyIsPool) return SwapType.RemoveLiquidity;
+        if (!sellIsPool && buyIsPool) return SwapType.AddLiquidity;
         return SwapType.Invalid; // Both are pool tokens
     }
 
@@ -161,9 +180,8 @@ contract UniswapV2SwapAdapter is ISwapAdapter {
             return trade;
         }
         IUniswapV2Pair pair = IUniswapV2Pair(address(bytes20(poolId)));
-        uint256 token0 = pair.token0();
-        uint256 token1 = pair.token1();
-
+        address token0 = pair.token0();
+        address token1 = pair.token1();
         // Determine which token we need to buy (the other token in the pair)
         address tokenToBuy;
         if (sellToken == token0) {
@@ -175,6 +193,9 @@ contract UniswapV2SwapAdapter is ISwapAdapter {
         }
        
         bool zero2one = sellToken < tokenToBuy;
+
+        uint112 r0;
+        uint112 r1;
 
         if (zero2one) {
             (r0, r1,) = pair.getReserves();  
@@ -190,7 +211,8 @@ contract UniswapV2SwapAdapter is ISwapAdapter {
         //https://github.com/Uniswap/v2-periphery/blob/master/contracts/UniswapV2Router02.sol#L33 
         //https://rareskills.io/post/uniswap-v2-router
 
-        (uint256 requiredToken0, uint256 requiredToken1) = _calcTokensOutGivenExactLpTokenIn(pair, r0, r1, specifiedAmount); 
+        uint256 totalSupply = pair.totalSupply();
+        (uint256 requiredToken0, uint256 requiredToken1) = getLiquidityValue(poolId, specifiedAmount); 
 
         uint256 requiredSellAmount;
         uint256 requiredBuyAmount;
@@ -223,15 +245,15 @@ contract UniswapV2SwapAdapter is ISwapAdapter {
         OrderSide side,
         uint256 specifiedAmount
     ) private returns (Trade memory trade) {
+        address swapper = msg.sender;
         if (specifiedAmount == 0) {
             return trade;
         }
         
         IUniswapV2Pair pair = IUniswapV2Pair(address(bytes20(poolId)));
 
-
-        uint256 token0 = pair.token0();
-        uint256 token1 = pair.token1();
+        address token0 = pair.token0();
+        address token1 = pair.token1();
         
         // Determine which token we want to end up with (buyToken)
         // and which token we'll need to swap away
@@ -241,13 +263,15 @@ contract UniswapV2SwapAdapter is ISwapAdapter {
         if (buyToken == token0) {
             tokenToSell = token1;
         } else if (buyToken == token1) {
-            tokenToSwap = token0;
+            tokenToSell = token0;
         } else {
             revert("UniswapV2SwapAdapter: buyToken not in pool");
         }
         
-        bool zero2one = tokenToSwap < tokenToSell;
+        bool zero2one = tokenToSell < tokenToKeep;
 
+        uint112 r0;
+        uint112 r1;
         //we still need to keep this because the reserve order still has to be right to calculate the 
         //price correctly 
         if (zero2one) {
@@ -258,8 +282,8 @@ contract UniswapV2SwapAdapter is ISwapAdapter {
 
         uint256 gasBefore = gasleft();
         //transfer amount of liquidity (lpToken) to burn to pair contract 
-        IERC20(pair).safeTransferFrom(swapper, address(pair), specifiedAmount);
-        (uint256 amount0, uint256 amount1) = pair.burn(msg.sender);
+        IERC20(address(pair)).safeTransferFrom(swapper, address(pair), specifiedAmount);
+        (uint256 amount0, uint256 amount1) = pair.burn(msg.sender); // entering the burn method and the reserves arent being called, meaning that it overflows very early 
         
         // Determine how much of each token we received from burning
         uint256 receivedTokenToKeep;
@@ -274,8 +298,8 @@ contract UniswapV2SwapAdapter is ISwapAdapter {
         }
 
         //swap superfluous token to buyToken (the > 0 check is because burn does not guarantee it will return a non zero value)
-        if (receivedTokenToSwap > 0) {
-            trade.calculatedAmount = sell(pair, sellToken, zero2one, r0, r1, requiredSellAmount);
+        if (receivedTokenToSell > 0) {
+            trade.calculatedAmount = sell(pair, sellToken, zero2one, r0, r1, receivedTokenToSell);
         }
         trade.gasUsed = gasBefore - gasleft();
         trade.price = getPriceAt(trade.calculatedAmount, r0, r1); 
@@ -292,15 +316,15 @@ contract UniswapV2SwapAdapter is ISwapAdapter {
         //if sellToken and BuyToken is uniswapV2pair addresss revert
         //buying and selling lp tokens 
          // Determine swap type based on token addresses
-        SwapType swapType = _getSwapType(sellToken, buyToken);
+        SwapType swapType = _getSwapType(poolId, sellToken, buyToken);
 
         // Execute appropriate swap logic
         if (swapType == SwapType.TokenToToken) {
-            trade = _executeTokenSwap(sellToken, buyToken, side, specifiedAmount);
-        } else if (swapType == SwapType.ExitPool) {
-            trade = _executeAddLiquidity(sellToken, buyToken, side, specifiedAmount);
-        } else if (swapType == SwapType.JoinPool) {
-            trade = _executeRemoveLiquidity(sellToken, buyToken, side, specifiedAmount);
+            trade = _executeTokenSwap(poolId, sellToken, buyToken, side, specifiedAmount);
+        } else if (swapType == SwapType.RemoveLiquidity) {
+            trade = _executeRemoveLiquidity(poolId, sellToken, buyToken, side, specifiedAmount);
+        } else if (swapType == SwapType.AddLiquidity) {
+            trade = _executeAddLiquidity(poolId, sellToken, buyToken, side, specifiedAmount);
         } else {
             revert("SwapAdapter: LP-to-LP swap not supported");
         }
