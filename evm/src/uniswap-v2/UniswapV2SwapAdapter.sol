@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 pragma solidity ^0.8.13;
-
+import "forge-std/Test.sol";
 import {ISwapAdapter} from "src/interfaces/ISwapAdapter.sol";
 import {
     IERC20,
@@ -85,7 +85,7 @@ contract UniswapV2SwapAdapter is ISwapAdapter {
                 totalSupply = totalSupply.add(feeLiquidity);
             }
         }
-        return (reservesA.mul(liquidityAmount) / totalSupply, reservesB.mul(liquidityAmount) / totalSupply);
+        return (reservesA.mul(liquidityAmount) / totalSupply, reservesB.mul(liquidityAmount) / totalSupply); // overflow is not a mixing safemath and / issue dw
     }
 
     // get all current parameters from the pair and compute value of a liquidity amount
@@ -194,15 +194,6 @@ contract UniswapV2SwapAdapter is ISwapAdapter {
        
         bool zero2one = sellToken < tokenToBuy;
 
-        uint112 r0;
-        uint112 r1;
-
-        if (zero2one) {
-            (r0, r1,) = pair.getReserves();  
-        } else {
-            (r1, r0,) = pair.getReserves();  
-        }
-
         uint256 gasBefore = gasleft();
         // NOTE: Since we can't specify the amount of tokenA and tokenB that we want, we calculate the proportions needed to add to the pool 
         // Ideally, we want to make sure we deposit the two tokens at exactly the same ratio as what the pair currently has, otherwise 
@@ -213,6 +204,15 @@ contract UniswapV2SwapAdapter is ISwapAdapter {
 
         uint256 totalSupply = pair.totalSupply();
         (uint256 requiredToken0, uint256 requiredToken1) = getLiquidityValue(poolId, specifiedAmount); 
+
+        uint112 r0;
+        uint112 r1;
+
+        if (zero2one) {
+            (r0, r1,) = pair.getReserves();  
+        } else {
+            (r1, r0,) = pair.getReserves();  
+        }
 
         uint256 requiredSellAmount;
         uint256 requiredBuyAmount;
@@ -226,6 +226,7 @@ contract UniswapV2SwapAdapter is ISwapAdapter {
             requiredSellAmount = requiredToken1;
             requiredBuyAmount = requiredToken0;
         }
+
         // Calculate how much buyToken we need to buy, provided we have enough sellToken
         trade.calculatedAmount = buy(pair, sellToken, zero2one, r0, r1, requiredBuyAmount); 
         trade.gasUsed = gasBefore - gasleft();
@@ -272,34 +273,39 @@ contract UniswapV2SwapAdapter is ISwapAdapter {
 
         uint112 r0;
         uint112 r1;
-        //we still need to keep this because the reserve order still has to be right to calculate the 
-        //price correctly 
+
+        uint256 gasBefore = gasleft();
+        //transfer amount of liquidity (lpToken) to burn to pair contract 
+        IERC20(address(pair)).safeTransferFrom(swapper, address(pair), specifiedAmount); 
+        (uint256 amount0, uint256 amount1) = pair.burn(address(this)); // transfers redeemed tokens to the adapter so tokens are held in the adapter first, then swapped after
         if (zero2one) {
             (r0, r1,) = pair.getReserves();  
         } else {
             (r1, r0,) = pair.getReserves(); 
         }
-
-        uint256 gasBefore = gasleft();
-        //transfer amount of liquidity (lpToken) to burn to pair contract 
-        IERC20(address(pair)).safeTransferFrom(swapper, address(pair), specifiedAmount);
-        (uint256 amount0, uint256 amount1) = pair.burn(msg.sender); // entering the burn method and the reserves arent being called, meaning that it overflows very early 
-        
         // Determine how much of each token we received from burning
-        uint256 receivedTokenToKeep;
-        uint256 receivedTokenToSell;
+        uint256 receivedTokenToKeepAmt;
+        uint256 receivedTokenToSellAmt;
 
         if (tokenToKeep == token0) {
-            receivedTokenToKeep = amount0;
-            receivedTokenToSell = amount1;
+            receivedTokenToKeepAmt = amount0;
+            receivedTokenToSellAmt = amount1;
         } else {
-            receivedTokenToKeep = amount1;
-            receivedTokenToSell = amount0;
+            receivedTokenToKeepAmt = amount1;
+            receivedTokenToSellAmt = amount0;
         }
-
+        
         //swap superfluous token to buyToken (the > 0 check is because burn does not guarantee it will return a non zero value)
-        if (receivedTokenToSell > 0) {
-            trade.calculatedAmount = sell(pair, sellToken, zero2one, r0, r1, receivedTokenToSell);
+        if (receivedTokenToSellAmt > 0) {
+            //Transfer the redeemed receivedTokenToSellAmt of tokens from the adapter to the pair
+            IERC20(tokenToSell).safeTransfer(address(pair), receivedTokenToSellAmt);
+            uint256 amountOut = getAmountOut(receivedTokenToSellAmt, r0, r1);
+            if (zero2one) {
+                pair.swap(0, amountOut, swapper, "");
+            } else {
+                pair.swap(amountOut, 0, swapper, "");
+            }
+            trade.calculatedAmount = amountOut;
         }
         trade.gasUsed = gasBefore - gasleft();
         trade.price = getPriceAt(trade.calculatedAmount, r0, r1); 
