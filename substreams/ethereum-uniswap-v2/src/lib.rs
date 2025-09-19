@@ -3,6 +3,7 @@
 mod abi;
 mod modules;
 mod pb;
+mod events;
 
 pub use modules::*;
 
