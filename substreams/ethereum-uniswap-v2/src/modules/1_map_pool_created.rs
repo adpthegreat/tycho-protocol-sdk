@@ -29,7 +29,7 @@ pub fn map_pools_created(
 
     let tycho_block: Block = (&block).into();
 
-    Ok(BlockChanges { block: Some(tycho_block), changes: new_pools })
+    Ok(BlockChanges { block: Some(tycho_block), changes: new_pools, storage_changes: vec![]})
 }
 
 fn get_pools(block: &eth::Block, new_pools: &mut Vec<TransactionChanges>, params: &Params) {
@@ -39,7 +39,7 @@ fn get_pools(block: &eth::Block, new_pools: &mut Vec<TransactionChanges>, params
 
         new_pools.push(TransactionChanges {
             tx: Some(tycho_tx.clone()),
-            contract_changes: vec![],
+            contract_changes: vec![], 
             entity_changes: vec![EntityChanges {
                 component_id: event.pair.to_hex(),
                 attributes: vec![
@@ -53,11 +53,26 @@ fn get_pools(block: &eth::Block, new_pools: &mut Vec<TransactionChanges>, params
                         value: BigInt::from(0).to_signed_bytes_be(),
                         change: ChangeType::Creation.into(),
                     },
+                    Attribute {
+                        name: "balance0".to_string(),
+                        value: BigInt::from(0).to_signed_bytes_be(),
+                        change: ChangeType::Creation.into(),
+                    },
+                    Attribute {
+                        name: "balance1".to_string(),
+                        value: BigInt::from(0).to_signed_bytes_be(),
+                        change: ChangeType::Creation.into(),
+                    },
+                    Attribute {
+                        name: "liquidity".to_string(),
+                        value: BigInt::from(0).to_signed_bytes_be(),
+                        change: ChangeType::Creation.into(),
+                    },
                 ],
             }],
             component_changes: vec![ProtocolComponent {
                 id: event.pair.to_hex(),
-                tokens: vec![event.token0.clone(), event.token1.clone()],
+                tokens: vec![event.token0.clone(), event.token1.clone(), event.pair.clone()],
                 contracts: vec![],
                 static_att: vec![
                     // Trading Fee is hardcoded to 0.3%, saved as int in bps (basis points)
@@ -67,7 +82,7 @@ fn get_pools(block: &eth::Block, new_pools: &mut Vec<TransactionChanges>, params
                         change: ChangeType::Creation.into(),
                     },
                     Attribute {
-                        name: "pool_address".to_string(),
+                        name: "pool_address".to_string(), //pool address which is the uniswap v2 pair address is lp_token address 
                         value: event.pair.clone(),
                         change: ChangeType::Creation.into(),
                     },
@@ -79,7 +94,7 @@ fn get_pools(block: &eth::Block, new_pools: &mut Vec<TransactionChanges>, params
                     attribute_schema: vec![],
                     implementation_type: ImplementationType::Custom.into(),
                 }),
-                tx: Some(tycho_tx),
+                // tx: Some(tycho_tx),
             }],
             balance_changes: vec![
                 BalanceChange {
@@ -93,6 +108,8 @@ fn get_pools(block: &eth::Block, new_pools: &mut Vec<TransactionChanges>, params
                     component_id: event.pair.to_hex().as_bytes().to_vec(),
                 },
             ],
+            entrypoints: vec![],
+            entrypoint_params: vec![],
         })
     };
 
