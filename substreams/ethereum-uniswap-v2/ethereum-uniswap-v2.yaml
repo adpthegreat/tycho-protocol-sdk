@@ -8,6 +8,7 @@ protobuf:
   files:
     - tycho/evm/v1/common.proto
     - tycho/evm/v1/entity.proto
+    - tycho/evm/v1/utils.proto
     - uniswap.proto
   importPaths:
     - ./proto/v1
@@ -21,7 +22,7 @@ binaries:
 modules:
   - name: map_pools_created
     kind: map
-    initialBlock: 10008300
+    initialBlock: 17046830
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
@@ -30,19 +31,46 @@ modules:
 
   - name: store_pools
     kind: store
-    initialBlock: 10008300
+    initialBlock: 17046830
     updatePolicy: set_if_not_exists
     valueType: proto:tycho.evm.uniswap.v2.Pool
     inputs:
       - map: map_pools_created
+    
+  - name: store_pool_tokens
+    kind: store
+    initialBlock: 17046830
+    updatePolicy: set
+    valueType: string
+    inputs:
+      - map: map_pools_created
+    
+  - name: map_relative_balances
+    kind: map
+    initialBlock: 17046830
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - store: store_pools
+      - store: store_pool_tokens
+    output:  
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+    
+  - name: store_balances
+    kind: store
+    initialBlock: 17046830
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_relative_balances
 
   - name: map_pool_events
     kind: map
-    initialBlock: 10008300
+    initialBlock: 17046830
     inputs:
       - source: sf.ethereum.type.v2.Block
       - map: map_pools_created
       - store: store_pools
+      - store: store_balances
     output:
       type: proto:tycho.evm.v1.BlockChanges
 

@@ -64,7 +64,7 @@ fn get_pools(block: &eth::Block, new_pools: &mut Vec<TransactionChanges>, params
                         change: ChangeType::Creation.into(),
                     },
                     Attribute {
-                        name: "liquidity".to_string(),
+                        name: "liquidity".to_string(), //LP token
                         value: BigInt::from(0).to_signed_bytes_be(),
                         change: ChangeType::Creation.into(),
                     },

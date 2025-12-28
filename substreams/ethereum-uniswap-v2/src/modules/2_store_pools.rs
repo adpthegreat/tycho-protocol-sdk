@@ -1,5 +1,6 @@
-use substreams::store::{StoreNew, StoreSetIfNotExists, StoreSetIfNotExistsProto};
-
+use substreams::store::{StoreNew, StoreSetString, StoreSetIfNotExists, StoreSetIfNotExistsProto, StoreSet};
+use substreams_helper::hex::Hexable;
+use itertools::Itertools;
 use crate::store_key::StoreKey;
 use tycho_substreams::prelude::*;
 
@@ -20,4 +21,24 @@ pub fn store_pools(
             );
         }
     }
+}
+
+/// Get result `map_pools_created` and stores the created `ProtocolComponent`s with the pool id as the
+/// key and tokens as the value
+#[substreams::handlers::store]
+pub fn store_pool_tokens(map: BlockChanges, store: StoreSetString) {
+    map.changes
+        .iter()
+        .flat_map(|tx_changes| &tx_changes.component_changes)
+        .for_each(|component| {
+            store.set(
+                0,
+                format!("Pool:{0}", component.id),
+                &component
+                    .tokens
+                    .iter()
+                    .map(hex::encode)
+                    .join(":"),
+            );
+        });
 }

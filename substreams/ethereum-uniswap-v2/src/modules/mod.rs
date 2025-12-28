@@ -4,7 +4,7 @@ pub use map_relative_balances::map_relative_balances;
 pub use store_balances::store_balances;
 pub use map_pool_events::map_pool_events;
 use substreams_ethereum::pb::eth::v2::TransactionTrace;
-use crate::pb::tycho::evm::uniswap::v2::Transaction;
+// use crate::pb::tycho::evm::uniswap::v2::Transaction;
 
 #[path = "1_map_pool_created.rs"]
 mod map_pool_created;
