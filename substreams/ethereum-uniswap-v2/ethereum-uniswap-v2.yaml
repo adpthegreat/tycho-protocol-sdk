@@ -70,7 +70,7 @@ modules:
       - source: sf.ethereum.type.v2.Block
       - map: map_pools_created
       - store: store_pools
-      - store: store_balances
+      - map: map_relative_balances
     output:
       type: proto:tycho.evm.v1.BlockChanges
 
